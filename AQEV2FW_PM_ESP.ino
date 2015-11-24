@@ -4755,8 +4755,7 @@ void loop_wifi_mqtt_mode(void){
         
         if(pm_ready){
           if(!publishPM()){
-            Serial.println(F("Error: Failed to publish PM."));        
-            publish_tried_and_failed_at_least_once = true;    
+            Serial.println(F("Error: Failed to publish PM."));                    
           }
           else{
             updateLCD(pm_micrograms_per_cubic_meter, 5, 1, 3);  
