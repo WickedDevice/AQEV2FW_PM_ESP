@@ -323,7 +323,7 @@ const char cmd_string_altitude[] PROGMEM    = "altitude   ";
 const char cmd_string_ntpsrv[] PROGMEM      = "ntpsrv     ";
 const char cmd_string_tz_off[] PROGMEM      = "tz_off     ";
 const char cmd_string_pm_blv[] PROGMEM      = "pm_blv     ";
-const char cmd_string_pm_off2[] PROGMEM     = "pm_off2    ";
+const char cmd_string_pm_off2[] PROGMEM      = "pm_off2    ";
 const char cmd_string_null[] PROGMEM        = "";
 
 PGM_P const commands[] PROGMEM = {
@@ -3484,6 +3484,8 @@ void backup(char * arg) {
       CLEAR_BIT(backup_check, BACKUP_STATUS_PM_CALIBRATION_BIT);
       eeprom_write_word((uint16_t *) EEPROM_BACKUP_CHECK, backup_check);
     }
+
+    
   }
   else if (strncmp("temp", arg, 4) == 0) {
     eeprom_read_block(tmp, (const void *) EEPROM_TEMPERATURE_OFFSET, 4);
@@ -5103,7 +5105,7 @@ void pm_convert_from_volts_to_micrograms_per_cubic_meter(float volts, float * co
     if(mode == SUBMODE_OFFLINE){ // if we are in offline mode
       float test_pm_off2 = eeprom_read_float((const float *) EEPROM_PM_CAL_OFFSET_OFFLINE);
       if(!isnan(test_pm_off2)){  // and there is a legitimate value available for pm_off2, we should use it
-        Serial.println(F("Info: Using Offline Mode Offset for PM"));
+        //Serial.println(F("Info: Using Offline Mode Offset for PM"));
         pm_zero_volts = test_pm_off2;
       }
     }
