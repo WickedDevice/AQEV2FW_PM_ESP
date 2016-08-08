@@ -19,7 +19,7 @@
 // semantic versioning - see http://semver.org/
 #define AQEV2FW_MAJOR_VERSION 2
 #define AQEV2FW_MINOR_VERSION 1
-#define AQEV2FW_PATCH_VERSION 8
+#define AQEV2FW_PATCH_VERSION 9
 
 #define WLAN_SEC_AUTO (10) // made up to support auto-config of security
 
@@ -181,13 +181,15 @@ uint8_t mode = MODE_OPERATIONAL;
 #define EEPROM_USE_NTP            (EEPROM_MQTT_TOPIC_PREFIX - 1)  // 1 means use NTP, anything else means don't use NTP
 #define EEPROM_NTP_SERVER_NAME    (EEPROM_USE_NTP - 32)           // 32-bytes for the NTP server to use
 #define EEPROM_NTP_TZ_OFFSET_HRS  (EEPROM_NTP_SERVER_NAME - 4)    // timezone offset as a floating point value
-#define EEPROM_PM_BASELINE_VOLTAGE_TABLE (EEPROM_NTP_TZ_OFFSET_HRS - (5*sizeof(baseline_voltage_t))) // array of (up to) five structures for baseline offset characterization over temperature
+#define EEPROM_PM_BASELINE_VOLTAGE_TABLE  (EEPROM_NTP_TZ_OFFSET_HRS - (5*sizeof(baseline_voltage_t))) // array of (up to) five structures for baseline offset characterization over temperature
 #define EEPROM_MQTT_TOPIC_SUFFIX_ENABLED  (EEPROM_PM_BASELINE_VOLTAGE_TABLE - 1) 
+#define EEPROM_PM_CAL_OFFSET_OFFLINE      (EEPROM_MQTT_TOPIC_SUFFIX_ENABLED - 4) // the offset which is applicable to offline mode, as this may differ from online mode
 //  /\
 //   L Add values up here by subtracting offsets to previously added values
 //   * ... and make sure the addresses don't collide and start overlapping!
 //   T Add values down here by adding offsets to previously added values
 //  \/
+#define EEPROM_BACKUP_PM_CAL_OFFSET_OFFLINE (EEPROM_BACKUP_NTP_TZ_OFFSET_HRS + 4)
 #define EEPROM_BACKUP_NTP_TZ_OFFSET_HRS  (EEPROM_BACKUP_HUMIDITY_OFFSET + 4)
 #define EEPROM_BACKUP_HUMIDITY_OFFSET    (EEPROM_BACKUP_TEMPERATURE_OFFSET + 4)
 #define EEPROM_BACKUP_TEMPERATURE_OFFSET (EEPROM_BACKUP_PRIVATE_KEY + 32)
@@ -263,6 +265,7 @@ void set_ntp_timezone_offset(char * arg);
 void set_update_server_name(char * arg);
 void pm_baseline_voltage_characterization_command(char * arg);
 void topic_suffix_config(char * arg);
+void set_pm_offset_offline(char * arg);
 
 // Note to self:
 //   When implementing a new parameter, ask yourself:
@@ -320,6 +323,7 @@ const char cmd_string_altitude[] PROGMEM    = "altitude   ";
 const char cmd_string_ntpsrv[] PROGMEM      = "ntpsrv     ";
 const char cmd_string_tz_off[] PROGMEM      = "tz_off     ";
 const char cmd_string_pm_blv[] PROGMEM      = "pm_blv     ";
+const char cmd_string_pm_off2[] PROGMEM     = "pm_off2    ";
 const char cmd_string_null[] PROGMEM        = "";
 
 PGM_P const commands[] PROGMEM = {
@@ -360,7 +364,8 @@ PGM_P const commands[] PROGMEM = {
   cmd_string_altitude,
   cmd_string_ntpsrv,
   cmd_string_tz_off,
-  cmd_string_pm_blv, 
+  cmd_string_pm_blv,
+  cmd_string_pm_off2, 
   cmd_string_null
 };
 
@@ -403,6 +408,7 @@ void (*command_functions[])(char * arg) = {
   set_ntp_server,
   set_ntp_timezone_offset,
   pm_baseline_voltage_characterization_command,
+  set_pm_offset_offline,
   0
 };
 
@@ -467,16 +473,6 @@ void setup() {
   initializeHardware(); 
   backlightOff();
       
-  //  uint8_t tmp[EEPROM_CONFIG_MEMORY_SIZE] = {0};
-  //  get_eeprom_config(tmp);
-  //  Serial.println(F("EEPROM Config:"));
-  //  dump_config(tmp);
-  //  Serial.println();
-  //  Serial.println(F("Mirrored Config:"));
-  //  get_mirrored_config(tmp);  
-  //  dump_config(tmp);
-  //  Serial.println();
-  
   integrity_check_passed = checkConfigIntegrity();
   // if the integrity check failed, try and undo the damage using the mirror config, if it's valid
   if(!integrity_check_passed){
@@ -2147,8 +2143,10 @@ void print_eeprom_value(char * arg) {
     Serial.println(F(" | Sensor Calibrations:                                        |"));
     Serial.println(F(" +-------------------------------------------------------------+"));
 
-    print_label_with_star_if_not_backed_up("PM Offset [V]: ", BACKUP_STATUS_PM_CALIBRATION_BIT);
+    print_label_with_star_if_not_backed_up("Online PM Offset [V]: ", BACKUP_STATUS_PM_CALIBRATION_BIT);
     print_eeprom_float((const float *) EEPROM_PM_CAL_OFFSET);
+    print_label_with_star_if_not_backed_up("Offline PM Offset [V]: ", BACKUP_STATUS_PM_CALIBRATION_BIT);
+    print_eeprom_float((const float *) EEPROM_PM_CAL_OFFSET_OFFLINE);    
     Serial.print(F("    ")); Serial.println(F("PM Baseline Voltage Characterization:"));
     print_baseline_voltage_characterization(EEPROM_PM_BASELINE_VOLTAGE_TABLE);
     char temp_reporting_offset_label[64] = {0};
@@ -2329,6 +2327,8 @@ void restore(char * arg) {
 
     eeprom_read_block(tmp, (const void *) EEPROM_BACKUP_PM_CAL_OFFSET, 4);
     eeprom_write_block(tmp, (void *) EEPROM_PM_CAL_OFFSET, 4);
+    eeprom_read_block(tmp, (const void *) EEPROM_BACKUP_PM_CAL_OFFSET_OFFLINE, 4);
+    eeprom_write_block(tmp, (void *) EEPROM_PM_CAL_OFFSET_OFFLINE, 4);    
   }
   else if (strncmp("temp_off", arg, 8) == 0) {
     if (!BIT_IS_CLEARED(backup_check, BACKUP_STATUS_TEMPERATURE_CALIBRATION_BIT)) {
@@ -3477,7 +3477,9 @@ void backup(char * arg) {
   else if (strncmp("pm", arg, 2) == 0) {
     eeprom_read_block(tmp, (const void *) EEPROM_PM_CAL_OFFSET, 4);
     eeprom_write_block(tmp, (void *) EEPROM_BACKUP_PM_CAL_OFFSET, 4);
-
+    eeprom_read_block(tmp, (const void *) EEPROM_PM_CAL_OFFSET_OFFLINE, 4);
+    eeprom_write_block(tmp, (void *) EEPROM_BACKUP_PM_CAL_OFFSET_OFFLINE, 4);
+    
     if (!BIT_IS_CLEARED(backup_check, BACKUP_STATUS_PM_CALIBRATION_BIT)) {
       CLEAR_BIT(backup_check, BACKUP_STATUS_PM_CALIBRATION_BIT);
       eeprom_write_word((uint16_t *) EEPROM_BACKUP_CHECK, backup_check);
@@ -3574,6 +3576,10 @@ void set_ntp_timezone_offset(char * arg){
 
 void set_pm_offset(char * arg) {
   set_float_param(arg, (float *) EEPROM_PM_CAL_OFFSET, 0);
+}
+
+void set_pm_offset_offline(char * arg){
+  set_float_param(arg, (float *) EEPROM_PM_CAL_OFFSET_OFFLINE, 0);
 }
 
 void set_reported_temperature_offset(char * arg) {
@@ -4793,6 +4799,8 @@ boolean mqttReconnect(void){
        return false;       
      }    
    }  
+
+   return loop_return_flag;
 }
 
 boolean mqttPublish(char * topic, char *str){
@@ -5091,7 +5099,14 @@ void pm_convert_from_volts_to_micrograms_per_cubic_meter(float volts, float * co
   static boolean first_access = true;
   static float pm_zero_volts = 0.0f;
   if(first_access){   
-    pm_zero_volts = eeprom_read_float((const float *) EEPROM_PM_CAL_OFFSET);
+    pm_zero_volts = eeprom_read_float((const float *) EEPROM_PM_CAL_OFFSET);    
+    if(mode == SUBMODE_OFFLINE){ // if we are in offline mode
+      float test_pm_off2 = eeprom_read_float((const float *) EEPROM_PM_CAL_OFFSET_OFFLINE);
+      if(!isnan(test_pm_off2)){  // and there is a legitimate value available for pm_off2, we should use it
+        Serial.println(F("Info: Using Offline Mode Offset for PM"));
+        pm_zero_volts = test_pm_off2;
+      }
+    }
     first_access = false;
   }
 
@@ -6228,23 +6243,18 @@ void getNetworkTime(void){
 
 /*
 void dump_config(uint8_t * buf){    
-  uint16_t addr = 0;
-  uint8_t ii = 0;
-  while(addr < EEPROM_CONFIG_MEMORY_SIZE){
-    if(ii == 0){
-      Serial.print(addr, HEX);
-      Serial.print(F(": ")); 
-    }    
-    
-    Serial.print(buf[addr], HEX);
-    Serial.print(F("\t"));
-    
-    addr++;
-    ii++;
-    if(ii == 32){
+  for(int16_t ii = E2END - EEPROM_CONFIG_MEMORY_SIZE; ii <= E2END; ii++){
+     if((ii % 16) == 0){
       Serial.println();
-      ii = 0; 
-    }
+      Serial.print(ii, HEX);
+      Serial.print("  ");
+     }
+     uint8_t val = eeprom_read_byte(ii); 
+     Serial.print("0x");
+     if(val < 0x10) Serial.print("0");
+     Serial.print(val, HEX);
+     Serial.print(" ");
   }
+  Serial.println();
 }
 */
