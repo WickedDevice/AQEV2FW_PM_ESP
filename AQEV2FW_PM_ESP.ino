@@ -1086,11 +1086,17 @@ void initializeNewConfigSettings(void){
     // sampled every 5 seconds, 
     // averaged over 60 seconds, and 
     // reported every 60 seconds
+    eeprom_write_byte((uint8_t *) EEPROM_SETTINGS_UPDATED_2_1_9, 1);    
+    
     memset(command_buf, 0, 128);
     strcat(command_buf, "sampling 5,60,60\r");        
     configInject(command_buf);  
-    eeprom_write_byte((uint8_t *) EEPROM_SETTINGS_UPDATED_2_1_9, 1);
-    recomputeAndStoreConfigChecksum();
+
+    // also eliminate the PM offset, 
+    // as assumptions underlying that calibration have changed
+    memset(command_buf, 0, 128);
+    strcat(command_buf, "pm_off 0.0\r");              
+    configInject(command_buf); 
   }
   
   if(in_config_mode){
