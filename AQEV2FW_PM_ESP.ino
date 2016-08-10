@@ -183,13 +183,12 @@ uint8_t mode = MODE_OPERATIONAL;
 #define EEPROM_NTP_TZ_OFFSET_HRS  (EEPROM_NTP_SERVER_NAME - 4)    // timezone offset as a floating point value
 #define EEPROM_PM_BASELINE_VOLTAGE_TABLE  (EEPROM_NTP_TZ_OFFSET_HRS - (5*sizeof(baseline_voltage_t))) // array of (up to) five structures for baseline offset characterization over temperature
 #define EEPROM_MQTT_TOPIC_SUFFIX_ENABLED  (EEPROM_PM_BASELINE_VOLTAGE_TABLE - 1) 
-#define EEPROM_PM_CAL_OFFSET_OFFLINE      (EEPROM_MQTT_TOPIC_SUFFIX_ENABLED - 4) // the offset which is applicable to offline mode, as this may differ from online mode
+#define EEPROM_SETTINGS_UPDATED_2_1_9     (EEPROM_MQTT_TOPIC_SUFFIX_ENABLED - 1)
 //  /\
 //   L Add values up here by subtracting offsets to previously added values
 //   * ... and make sure the addresses don't collide and start overlapping!
 //   T Add values down here by adding offsets to previously added values
 //  \/
-#define EEPROM_BACKUP_PM_CAL_OFFSET_OFFLINE (EEPROM_BACKUP_NTP_TZ_OFFSET_HRS + 4)
 #define EEPROM_BACKUP_NTP_TZ_OFFSET_HRS  (EEPROM_BACKUP_HUMIDITY_OFFSET + 4)
 #define EEPROM_BACKUP_HUMIDITY_OFFSET    (EEPROM_BACKUP_TEMPERATURE_OFFSET + 4)
 #define EEPROM_BACKUP_TEMPERATURE_OFFSET (EEPROM_BACKUP_PRIVATE_KEY + 32)
@@ -265,7 +264,6 @@ void set_ntp_timezone_offset(char * arg);
 void set_update_server_name(char * arg);
 void pm_baseline_voltage_characterization_command(char * arg);
 void topic_suffix_config(char * arg);
-void set_pm_offset_offline(char * arg);
 
 // Note to self:
 //   When implementing a new parameter, ask yourself:
@@ -408,7 +406,6 @@ void (*command_functions[])(char * arg) = {
   set_ntp_server,
   set_ntp_timezone_offset,
   pm_baseline_voltage_characterization_command,
-  set_pm_offset_offline,
   0
 };
 
@@ -441,7 +438,8 @@ const uint8_t heartbeat_waveform[NUM_HEARTBEAT_WAVEFORM_SAMPLES] PROGMEM = {
 };
 uint8_t heartbeat_waveform_index = 0;
 
-char scratch[512] = { 0 };  // scratch buffer, for general use
+char scratch[1024] = { 0 };  // scratch buffer, for general use
+char history_scratch[512] = { 0 }; // scratch buffer, for rendering histories
 #define ESP8266_INPUT_BUFFER_SIZE (1500)
 uint8_t esp8266_input_buffer[ESP8266_INPUT_BUFFER_SIZE] = {0};     // sketch must instantiate a buffer to hold incoming data
                                                                    // 1500 bytes is way overkill for MQTT, but if you have it, may as well
@@ -450,6 +448,7 @@ char converted_value_string[64] = {0};
 char compensated_value_string[64] = {0};
 char raw_value_string[64] = {0};
 char raw_instant_value_string[64] = {0};
+char cal_offset_string[64] = {0};
 
 char MQTT_TOPIC_STRING[128] = {0};
 char MQTT_TOPIC_PREFIX[64] = "/orgs/wd/aqe/";
@@ -462,7 +461,7 @@ const char * header_row = "Timestamp,"
                "PM[V],"
                "Latitude[deg],"
                "Longitude[deg],"
-               "Altitude[m],";     
+               "Altitude[m]";     
   
 void setup() {
   boolean integrity_check_passed = false;
@@ -750,7 +749,7 @@ void setup() {
     // it's a mode that doesn't require Wi-Fi
     // save settings as necessary
     commitConfigToMirroredConfig();
-    esp.sleep(2); // deep sleep    
+    esp.sleep(2); // deep sleep
   }
   
   // get the temperature units
@@ -1039,7 +1038,6 @@ void initializeNewConfigSettings(void){
   boolean in_config_mode = false; 
   allowed_to_write_config_eeprom = true;
 
-
   // if necessary, initialize the default mqtt prefix
   // if it's never been set, the first byte in memory will be 0xFF
   uint8_t val = eeprom_read_byte((const uint8_t *) EEPROM_MQTT_TOPIC_PREFIX);  
@@ -1076,6 +1074,23 @@ void initializeNewConfigSettings(void){
     memset(command_buf, 0, 128);
     strcat(command_buf, "mqttsuffix enable\r");        
     configInject(command_buf);    
+  }
+
+  val = eeprom_read_byte((const uint8_t *) EEPROM_SETTINGS_UPDATED_2_1_9);
+  if(val != 1){
+    if(!in_config_mode){
+      configInject("aqe\r");
+      in_config_mode = true;
+    }     
+    // update sampling settings to be
+    // sampled every 5 seconds, 
+    // averaged over 60 seconds, and 
+    // reported every 60 seconds
+    memset(command_buf, 0, 128);
+    strcat(command_buf, "sampling 5,60,60\r");        
+    configInject(command_buf);  
+    eeprom_write_byte((uint8_t *) EEPROM_SETTINGS_UPDATED_2_1_9, 1);
+    recomputeAndStoreConfigChecksum();
   }
   
   if(in_config_mode){
@@ -1269,7 +1284,7 @@ void prompt(void) {
 }
 
 // command processing function implementations
-void configInject(char * str) {
+void configInject(char const * str) {
   boolean reset_buffers = true;
   while (*str != '\0') {
     boolean got_exit = false;
@@ -1836,7 +1851,7 @@ void print_eeprom_float(const float * address) {
   Serial.println(val, 9);
 }
 
-void print_label_with_star_if_not_backed_up(char * label, uint8_t bit_number) {
+void print_label_with_star_if_not_backed_up(char const * label, uint8_t bit_number) {
   uint16_t backup_check = eeprom_read_word((const uint16_t *) EEPROM_BACKUP_CHECK);
   Serial.print(F("  "));
   if (!BIT_IS_CLEARED(backup_check, bit_number)) {
@@ -2143,10 +2158,8 @@ void print_eeprom_value(char * arg) {
     Serial.println(F(" | Sensor Calibrations:                                        |"));
     Serial.println(F(" +-------------------------------------------------------------+"));
 
-    print_label_with_star_if_not_backed_up("Online PM Offset [V]: ", BACKUP_STATUS_PM_CALIBRATION_BIT);
+    print_label_with_star_if_not_backed_up("PM Offset [V]: ", BACKUP_STATUS_PM_CALIBRATION_BIT);
     print_eeprom_float((const float *) EEPROM_PM_CAL_OFFSET);
-    print_label_with_star_if_not_backed_up("Offline PM Offset [V]: ", BACKUP_STATUS_PM_CALIBRATION_BIT);
-    print_eeprom_float((const float *) EEPROM_PM_CAL_OFFSET_OFFLINE);    
     Serial.print(F("    ")); Serial.println(F("PM Baseline Voltage Characterization:"));
     print_baseline_voltage_characterization(EEPROM_PM_BASELINE_VOLTAGE_TABLE);
     char temp_reporting_offset_label[64] = {0};
@@ -2231,7 +2244,7 @@ void restore(char * arg) {
     configInject("mqttuser wickeddevice\r");
     configInject("mqttprefix /orgs/wd/aqe/\r");
     configInject("mqttsuffix enable\r");
-    configInject("sampling 5, 30, 5\r");   
+    configInject("sampling 5,60,60\r");   
     configInject("ntpsrv disable\r");
     configInject("ntpsrv pool.ntp.org\r");
     configInject("restore tz_off\r");
@@ -2327,8 +2340,6 @@ void restore(char * arg) {
 
     eeprom_read_block(tmp, (const void *) EEPROM_BACKUP_PM_CAL_OFFSET, 4);
     eeprom_write_block(tmp, (void *) EEPROM_PM_CAL_OFFSET, 4);
-    eeprom_read_block(tmp, (const void *) EEPROM_BACKUP_PM_CAL_OFFSET_OFFLINE, 4);
-    eeprom_write_block(tmp, (void *) EEPROM_PM_CAL_OFFSET_OFFLINE, 4);    
   }
   else if (strncmp("temp_off", arg, 8) == 0) {
     if (!BIT_IS_CLEARED(backup_check, BACKUP_STATUS_TEMPERATURE_CALIBRATION_BIT)) {
@@ -3477,8 +3488,6 @@ void backup(char * arg) {
   else if (strncmp("pm", arg, 2) == 0) {
     eeprom_read_block(tmp, (const void *) EEPROM_PM_CAL_OFFSET, 4);
     eeprom_write_block(tmp, (void *) EEPROM_BACKUP_PM_CAL_OFFSET, 4);
-    eeprom_read_block(tmp, (const void *) EEPROM_PM_CAL_OFFSET_OFFLINE, 4);
-    eeprom_write_block(tmp, (void *) EEPROM_BACKUP_PM_CAL_OFFSET_OFFLINE, 4);
     
     if (!BIT_IS_CLEARED(backup_check, BACKUP_STATUS_PM_CALIBRATION_BIT)) {
       CLEAR_BIT(backup_check, BACKUP_STATUS_PM_CALIBRATION_BIT);
@@ -3578,10 +3587,6 @@ void set_ntp_timezone_offset(char * arg){
 
 void set_pm_offset(char * arg) {
   set_float_param(arg, (float *) EEPROM_PM_CAL_OFFSET, 0);
-}
-
-void set_pm_offset_offline(char * arg){
-  set_float_param(arg, (float *) EEPROM_PM_CAL_OFFSET_OFFLINE, 0);
 }
 
 void set_reported_temperature_offset(char * arg) {
@@ -4703,7 +4708,9 @@ void clearTempBuffers(void){
   memset(converted_value_string, 0, 64);
   memset(compensated_value_string, 0, 64);
   memset(raw_value_string, 0, 64);
-  memset(scratch, 0, 512);
+  memset(cal_offset_string, 0, 64);
+  memset(scratch, 0, 1024);
+  memset(history_scratch, 0, 512);
   memset(MQTT_TOPIC_STRING, 0, 128);
 }
 
@@ -4837,7 +4844,7 @@ boolean publishHeartbeat(){
   static uint32_t post_counter = 0;  
   uint8_t sample = pgm_read_byte(&heartbeat_waveform[heartbeat_waveform_index++]);
   
-  snprintf(scratch, 511, 
+  snprintf(scratch, 1023, 
   "{"
   "\"serial-number\":\"%s\","
   "\"converted-value\":%d,"
@@ -4881,16 +4888,21 @@ boolean publishTemperature(){
   }
   safe_dtostrf(reported_temperature, -6, 2, converted_value_string, 16);
   safe_dtostrf(raw_temperature, -6, 2, raw_value_string, 16);
+  safe_dtostrf(reported_temperature_offset_degC, -6, 2, cal_offset_string, 16);
   
   trim_string(converted_value_string);
   trim_string(raw_value_string);
   trim_string(raw_instant_value_string);
-
+  trim_string(cal_offset_string);
+  
   replace_nan_with_null(converted_value_string);
   replace_nan_with_null(raw_value_string);
   replace_nan_with_null(raw_instant_value_string);
+  replace_nan_with_null(cal_offset_string);
+
+  renderHistory(history_scratch, 512, TEMPERATURE_SAMPLE_BUFFER);
   
-  snprintf(scratch, 511,
+  snprintf(scratch, 1023,
     "{"
     "\"serial-number\":\"%s\","
     "\"converted-value\":%s,"
@@ -4898,7 +4910,9 @@ boolean publishTemperature(){
     "\"raw-value\":%s,"
     "\"raw-instant-value\":%s,"
     "\"raw-units\":\"deg%c\","
-    "\"sensor-part-number\":\"SHT25\""
+    "\"cal_offset\":%s,"
+    "\"sensor-part-number\":\"SHT25\","
+    "%s"
     "%s"
     "}", 
     mqtt_client_id, 
@@ -4907,6 +4921,8 @@ boolean publishTemperature(){
     raw_value_string, 
     raw_instant_value_string,
     temperature_units, 
+    cal_offset_string,
+    history_scratch,
     gps_mqtt_string);
 
   replace_character(scratch, '\'', '\"');
@@ -4931,16 +4947,21 @@ boolean publishHumidity(){
   safe_dtostrf(reported_humidity, -6, 2, converted_value_string, 16);
   safe_dtostrf(raw_humidity, -6, 2, raw_value_string, 16);
   safe_dtostrf(instant_humidity_percent, -6, 2, raw_instant_value_string, 16);
+  safe_dtostrf(reported_humidity_offset_percent, -6, 2, cal_offset_string, 16);
   
   trim_string(converted_value_string);
   trim_string(raw_value_string);
   trim_string(raw_instant_value_string);
+  trim_string(cal_offset_string);
 
   replace_nan_with_null(converted_value_string);
   replace_nan_with_null(raw_value_string);
   replace_nan_with_null(raw_instant_value_string);
+  replace_nan_with_null(cal_offset_string);
+
+  renderHistory(history_scratch, 512, TEMPERATURE_SAMPLE_BUFFER);
   
-  snprintf(scratch, 511, 
+  snprintf(scratch, 1023, 
     "{"
     "\"serial-number\":\"%s\","    
     "\"converted-value\":%s,"
@@ -4948,13 +4969,17 @@ boolean publishHumidity(){
     "\"raw-value\":%s,"
     "\"raw-instant-value\":%s,"
     "\"raw-units\":\"percent\","  
-    "\"sensor-part-number\":\"SHT25\""
+    "\"cal_offset\":%s,"
+    "\"sensor-part-number\":\"SHT25\","
+    "%s"
     "%s"
     "}", 
     mqtt_client_id, 
     converted_value_string, 
     raw_value_string, 
     raw_instant_value_string, 
+    cal_offset_string,
+    history_scratch,
     gps_mqtt_string);  
 
   replace_character(scratch, '\'', '\"');
@@ -5064,6 +5089,8 @@ void addSample(uint8_t sample_type, float value){
 
 void collectPM(void ){    
   if(burstSampleADC(PM_ADC_CHANNEL, &instant_pm_v)){   
+    // Serial.print("PM Sample: ");
+    // Serial.println(instant_pm_v);
     addSample(PM_SAMPLE_BUFFER, instant_pm_v);
     if(sample_buffer_idx == (sample_buffer_depth - 1)){
       pm_ready = true;
@@ -5102,13 +5129,6 @@ void pm_convert_from_volts_to_micrograms_per_cubic_meter(float volts, float * co
   static float pm_zero_volts = 0.0f;
   if(first_access){   
     pm_zero_volts = eeprom_read_float((const float *) EEPROM_PM_CAL_OFFSET);    
-    if(mode == SUBMODE_OFFLINE){ // if we are in offline mode
-      float test_pm_off2 = eeprom_read_float((const float *) EEPROM_PM_CAL_OFFSET_OFFLINE);
-      if(!isnan(test_pm_off2)){  // and there is a legitimate value available for pm_off2, we should use it
-        //Serial.println(F("Info: Using Offline Mode Offset for PM"));
-        pm_zero_volts = test_pm_off2;
-      }
-    }
     first_access = false;
   }
 
@@ -5137,24 +5157,30 @@ boolean publishPM(){
   clearTempBuffers();
   float converted_value = 0.0f, compensated_value = 0.0f;    
   float pm_moving_average = calculateAverage(&(sample_buffer[PM_SAMPLE_BUFFER][0]), sample_buffer_depth);
+  float pm_zero_volts = eeprom_read_float((const float *) EEPROM_PM_CAL_OFFSET); 
   pm_convert_from_volts_to_micrograms_per_cubic_meter(pm_moving_average, &converted_value, &compensated_value);
   pm_micrograms_per_cubic_meter = compensated_value;  
   safe_dtostrf(pm_moving_average, -8, 5, raw_value_string, 16);
   safe_dtostrf(converted_value, -4, 2, converted_value_string, 16);
   safe_dtostrf(compensated_value, -4, 2, compensated_value_string, 16); 
   safe_dtostrf(instant_pm_v, -8, 5, raw_instant_value_string, 16);
+  safe_dtostrf(pm_zero_volts, -8, 5, cal_offset_string, 16);
+
+  renderHistory(history_scratch, 512, PM_SAMPLE_BUFFER);
   
   trim_string(raw_value_string);
   trim_string(converted_value_string);
   trim_string(compensated_value_string);  
   trim_string(raw_instant_value_string);
+  trim_string(cal_offset_string);
   
   replace_nan_with_null(raw_value_string);
   replace_nan_with_null(converted_value_string);
   replace_nan_with_null(compensated_value_string);
   replace_nan_with_null(raw_instant_value_string);
-  
-  snprintf(scratch, 511, 
+  replace_nan_with_null(cal_offset_string);
+
+  snprintf(scratch, 1023, 
     "{"
     "\"serial-number\":\"%s\","       
     "\"raw-value\":%s,"
@@ -5163,7 +5189,9 @@ boolean publishPM(){
     "\"converted-value\":%s,"
     "\"converted-units\":\"ug/m^3\","
     "\"compensated-value\":%s,"
-    "\"sensor-part-number\":\"PPD60PV-T2\""
+    "\"cal_offset\":%s,"
+    "\"sensor-part-number\":\"PPD60PV-T2\","
+    "%s"
     "%s"
     "}",
     mqtt_client_id,
@@ -5171,6 +5199,8 @@ boolean publishPM(){
     raw_instant_value_string,
     converted_value_string, 
     compensated_value_string,
+    cal_offset_string,
+    history_scratch,
     gps_mqtt_string);  
 
   replace_character(scratch, '\'', '\"'); // replace single quotes with double quotes
@@ -5218,10 +5248,11 @@ void loop_wifi_mqtt_mode(void){
     
   if(current_millis - previous_mqtt_publish_millis >= reporting_interval){   
     suspendGpsProcessing();    
-    previous_mqtt_publish_millis = current_millis;      
-    
+    previous_mqtt_publish_millis = current_millis;          
     printCsvDataLine();
-    
+
+    reconnectToAccessPoint();
+    clearLCD();
     if(connectedToNetwork()){
       num_mqtt_intervals_without_wifi = 0;
       
@@ -5311,28 +5342,33 @@ void loop_wifi_mqtt_mode(void){
         }
       }
     }
-    else{
-      // not connected to Wi-Fi network
-      num_mqtt_intervals_without_wifi++;
-      Serial.print(F("Warn: Failed to connect to Wi-Fi network "));
-      Serial.print(num_mqtt_intervals_without_wifi);
-      Serial.print(F(" consecutive time"));
-      if(num_mqtt_intervals_without_wifi > 1){
-        Serial.print(F("s"));
-      }
-      Serial.println();      
-      if(num_mqtt_intervals_without_wifi >= 5){
-        Serial.println(F("Error: Wi-Fi Re-connect Failed 5 consecutive times. Forcing reboot."));
-        Serial.flush();
-        setLCD_P(PSTR(" WI-FI NETWORK  "
-                      "    FAILURE     "));
-        lcdFrownie(15, 1);
-        ERROR_MESSAGE_DELAY();         
-        watchdogForceReset();  
-      }
-      
-      restartWifi();
-    }
+
+    mqtt_client.disconnect();
+    esp.sleep(2);    
+    digitalWrite(esp8266_enable_pin, LOW);
+    
+//    else{
+//      // not connected to Wi-Fi network
+//      num_mqtt_intervals_without_wifi++;
+//      Serial.print(F("Warn: Failed to connect to Wi-Fi network "));
+//      Serial.print(num_mqtt_intervals_without_wifi);
+//      Serial.print(F(" consecutive time"));
+//      if(num_mqtt_intervals_without_wifi > 1){
+//        Serial.print(F("s"));
+//      }
+//      Serial.println();      
+//      if(num_mqtt_intervals_without_wifi >= 5){
+//        Serial.println(F("Error: Wi-Fi Re-connect Failed 5 consecutive times. Forcing reboot."));
+//        Serial.flush();
+//        setLCD_P(PSTR(" WI-FI NETWORK  "
+//                      "    FAILURE     "));
+//        lcdFrownie(15, 1);
+//        ERROR_MESSAGE_DELAY();         
+//        watchdogForceReset();  
+//      }
+//      
+//      restartWifi();
+//    }
   }    
 }
 
@@ -5631,8 +5667,8 @@ void downloadFile(char * hostname, uint16_t port, char * filename, void (*respon
   */ 
   esp.connect(hostname, port);
   if (esp.connected()) {   
-    memset(scratch, 0, 512);
-    snprintf(scratch, 511, "GET /%s HTTP/1.1\r\nHost: %s\r\n\r\n\r\n", filename, hostname);        
+    memset(scratch, 0, 1024);
+    snprintf(scratch, 1023, "GET /%s HTTP/1.1\r\nHost: %s\r\n\r\n\r\n", filename, hostname);        
     esp.print(scratch);
     //Serial.print(scratch);    
   } else {
@@ -6081,7 +6117,7 @@ void printCurrentTimestamp(char * append_to, uint16_t * append_to_capacity_and_u
   appendToString(datetime, append_to, append_to_capacity_and_update);  
 }
 
-void appendToString(char * str, char * append_to, uint16_t * append_to_capacity_and_update){
+void appendToString(char const * str, char * append_to, uint16_t * append_to_capacity_and_update){
   if(append_to != 0){
     uint16_t len = strlen(str);
     if(*append_to_capacity_and_update >= len){
@@ -6167,7 +6203,7 @@ void getNetworkTime(void){
   unsigned long ip, startTime, t = 0L;
   
   if(esp.getHostByName(server, &ip)) {
-    static const char PROGMEM
+    static const unsigned char PROGMEM
       timeReqA[] = { 227,  0,  6, 236 },
       timeReqB[] = {  49, 78, 49,  52 };
     
@@ -6243,6 +6279,28 @@ void getNetworkTime(void){
   }
 }
 
+void renderHistory(char * buf, uint16_t buf_length, uint8_t sensor_idx){
+  char tmp_sample[16] = {0};
+  char l_sample_buffer_idx = sample_buffer_idx; // oldest sample    
+  sprintf_P(buf, PSTR("\"history\":{\"timebase\":%d, \"samples\":["), sampling_interval);
+  for(uint16_t ii = 0; ii < sample_buffer_depth; ii++){
+    memset(tmp_sample, 0, 16);
+    safe_dtostrf(sample_buffer[sensor_idx][l_sample_buffer_idx], -8, 5, tmp_sample, 16);    
+
+    strcat(buf, tmp_sample);
+    if(ii != sample_buffer_depth - 1){
+      strcat(buf, ",");
+    }    
+    
+    l_sample_buffer_idx++;
+    if(l_sample_buffer_idx >= sample_buffer_depth){
+      l_sample_buffer_idx = 0;
+    }
+  }
+  strcat(buf, "]}");  
+//  Serial.print("History Payload: " );
+//  Serial.println(buf);
+}
 /*
 void dump_config(uint8_t * buf){    
   for(int16_t ii = E2END - EEPROM_CONFIG_MEMORY_SIZE; ii <= E2END; ii++){
