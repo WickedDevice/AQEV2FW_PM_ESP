@@ -4713,6 +4713,7 @@ boolean burstSampleADC(int adcChannel, float * result){
 void clearTempBuffers(void){
   memset(converted_value_string, 0, 64);
   memset(compensated_value_string, 0, 64);
+  memset(raw_instant_value_string, 0, 64);  
   memset(raw_value_string, 0, 64);
   memset(cal_offset_string, 0, 64);
   memset(scratch, 0, 1024);
@@ -4828,7 +4829,7 @@ boolean mqttPublish(char * topic, char *str){
   uint32_t space_required = 5;
   space_required += strlen(topic);
   space_required += strlen(str);
-  if(space_required >= 511){
+  if(space_required >= 1023){
     Serial.println(F("Aborted."));
     response_status = false;
   } 
