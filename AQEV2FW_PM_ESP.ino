@@ -347,7 +347,6 @@ const char cmd_string_altitude[] PROGMEM    = "altitude   ";
 const char cmd_string_ntpsrv[] PROGMEM      = "ntpsrv     ";
 const char cmd_string_tz_off[] PROGMEM      = "tz_off     ";
 const char cmd_string_pm_blv[] PROGMEM      = "pm_blv     ";
-const char cmd_string_pm_off2[] PROGMEM     = "pm_off2    ";
 const char cmd_string_usr_lat[] PROGMEM     = "latitude   ";
 const char cmd_string_usr_lng[] PROGMEM     = "longitude  ";
 const char cmd_string_usr_loc_en[] PROGMEM  = "location   ";
@@ -393,7 +392,6 @@ PGM_P const commands[] PROGMEM = {
   cmd_string_ntpsrv,
   cmd_string_tz_off,
   cmd_string_pm_blv,
-  cmd_string_pm_off2,
   cmd_string_usr_lat,
   cmd_string_usr_lng,
   cmd_string_usr_loc_en,
@@ -476,7 +474,7 @@ const uint8_t heartbeat_waveform[NUM_HEARTBEAT_WAVEFORM_SAMPLES] PROGMEM = {
 };
 uint8_t heartbeat_waveform_index = 0;
 
-#define SCRATCH_BUFFER_SIZE (512)
+#define SCRATCH_BUFFER_SIZE (1024)
 char scratch[SCRATCH_BUFFER_SIZE] = { 0 };  // scratch buffer, for general use
 uint16_t scratch_idx = 0;
 #define ESP8266_INPUT_BUFFER_SIZE (1500)
@@ -5160,7 +5158,7 @@ boolean publishPM(){
   replace_nan_with_null(compensated_value_string);
   replace_nan_with_null(raw_instant_value_string);
 
-  snprintf(scratch, 1023,
+  snprintf(scratch, SCRATCH_BUFFER_SIZE-1,
     "{"
     "\"serial-number\":\"%s\","
     "\"raw-value\":%s,"
@@ -5222,8 +5220,6 @@ void loop_wifi_mqtt_mode(void){
 
   // mqtt publish timer intervals
   static unsigned long previous_mqtt_publish_millis = 0;
-
-  mqttReconnect(); // mqtt_client.loop gets called in here
 
   if(current_millis - previous_mqtt_publish_millis >= reporting_interval){
     suspendGpsProcessing();
