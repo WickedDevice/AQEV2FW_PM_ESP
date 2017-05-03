@@ -5227,6 +5227,9 @@ void loop_wifi_mqtt_mode(void){
 
     printCsvDataLine();
 
+    reconnectToAccessPoint();    
+    clearLCD();
+    
     if(connectedToNetwork()){
       num_mqtt_intervals_without_wifi = 0;
 
