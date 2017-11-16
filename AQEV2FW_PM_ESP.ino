@@ -520,7 +520,6 @@ void setup() {
 
   // initialize hardware
   initializeHardware();
-  resumeGpsProcessing();
 
   //  uint8_t tmp[EEPROM_CONFIG_MEMORY_SIZE] = {0};
   //  get_eeprom_config(tmp);
@@ -702,10 +701,10 @@ void setup() {
       }
     }
 
-
+    resumeGpsProcessing();  
     Serial.println();
     delayForWatchdog();
-
+    
     // check to determine if we have a GPS
     uint32_t gps_wait = millis() + 1500;
     while(!gps_installed && (gpsSerial.available() || (millis() < gps_wait))){
