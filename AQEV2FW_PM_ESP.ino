@@ -591,6 +591,7 @@ void setup() {
     boolean soft_ap_config_activated = false;
     boolean touch_detected = false;
     current_millis = millis();
+    suspendGpsProcessing();
     while (current_millis < start + startup_time_period) { // can get away with this sort of thing at start up
       current_millis = millis();
 
@@ -600,7 +601,7 @@ void setup() {
         Serial.println(F("Info: Entering SoftAP Mode for Configuration"));
         break;
       }
-
+      
       if(current_millis - previous_touch_sampling_millis >= touch_sampling_interval){
         static uint8_t num_touch_intervals = 0;
         previous_touch_sampling_millis = current_millis;
@@ -746,17 +747,12 @@ void setup() {
       prompt();
       for (;;) {
         current_millis = millis();
-//        if(current_millis - previous_touch_sampling_millis >= touch_sampling_interval){
-//          previous_touch_sampling_millis = current_millis;
-//          collectTouch();
-//          processTouchQuietly();
-//        }
 
         // check to determine if we have a GPS
         while(!gps_installed && gpsSerial.available()){
           char c = gpsSerial.read();
           if(c == '$'){
-            gps_installed = true;
+            gps_installed = true;            
           }
         }
 
@@ -1019,24 +1015,26 @@ void loop() {
     // hardware doesn't matter in this case
     updateGpsStrings();
   }
-  else if(!gps_disabled){
+  else if(!gps_disabled){    
     while(gpsSerial.available()){
       char c = gpsSerial.read();
-
+      // Serial.print(c);
       if(c == '$'){
         gps_installed = true;
-      }
-
-      if(gps.encode(c)){
+      }      
+            
+      if(gps.encode(c)){        
         gps.f_get_position(&gps_latitude, &gps_longitude, &gps_age);
-        gps_altitude = gps.f_altitude();
+        gps_altitude = gps.f_altitude();        
         updateGpsStrings();
         break;
-      }
-    }
+      }       
+
+      processTouchBetweenGpsMessages(c);
+    }          
   }
 
-  if(first && !gps_installed){
+  if(first){
     first = false;
     updateGpsStrings();
   }
@@ -1053,12 +1051,13 @@ void loop() {
     advanceSampleBufferIndex();
   }
 
-  if(current_millis - previous_touch_sampling_millis >= touch_sampling_interval){
-    suspendGpsProcessing();
+  if(current_millis - previous_touch_sampling_millis >= touch_sampling_interval){    
     previous_touch_sampling_millis = current_millis;
-    collectTouch();
+    if(!gps_installed){
+      collectTouch();
+    }
     processTouchQuietly();
-  }
+  } 
 
   // the following loop routines *must* return reasonably frequently
   // so that the watchdog timer is serviced
@@ -1075,7 +1074,6 @@ void loop() {
 
   // pet the watchdog
   if (current_millis - previous_tinywdt_millis >= tinywdt_interval) {
-    suspendGpsProcessing();
     previous_tinywdt_millis = current_millis;
     //Serial.println(F("Info: Watchdog Pet."));
     delayForWatchdog();
@@ -1131,7 +1129,7 @@ void initializeHardware(void) {
   // without this line, if the touch hardware is absent
   // serial input processing grinds to a snails pace
   touch.set_CS_Timeout_Millis(100);
-  touch.set_CS_AutocaL_Millis(5000);
+  // touch.set_CS_AutocaL_Millis(5000);
 
   Serial.println(F(" +------------------------------------+"));
   Serial.println(F(" |   Welcome to Air Quality Egg 2.0   |"));
@@ -5170,21 +5168,22 @@ void collectHumidity(void){
 
 void collectTouch(void){
   static uint8_t sample_write_index = 0;
-  touch_sample_buffer[sample_write_index++] = touch.capacitiveSensor(30);
-
+  int32_t t = touch.capacitiveSensor(5);
+  // Serial.print("\nt: "); Serial.println(t);
+  touch_sample_buffer[sample_write_index++] = t;
   if(sample_write_index == TOUCH_SAMPLE_BUFFER_DEPTH){
     sample_write_index = 0;
   }
 }
 
 boolean processTouchVerbose(boolean verbose_output){
-  const uint32_t touch_event_threshold = 85UL;
+  const uint32_t touch_event_threshold = 12UL;
   static boolean first_time = true;
   static unsigned long touch_start_millis = 0UL;
   long backlight_interval = 60000L;
   static boolean backlight_is_on = false;
   boolean ret = false;
-
+  
   if(first_time){
     first_time = false;
     backlight_interval = ((long) eeprom_read_word((uint16_t *) EEPROM_BACKLIGHT_DURATION)) * 1000;
@@ -5464,8 +5463,7 @@ void loop_wifi_mqtt_mode(void){
   // mqtt publish timer intervals
   static unsigned long previous_mqtt_publish_millis = 0;
 
-  if(current_millis - previous_mqtt_publish_millis >= reporting_interval){
-    suspendGpsProcessing();
+  if(current_millis - previous_mqtt_publish_millis >= reporting_interval){    
     previous_mqtt_publish_millis = current_millis;
 
     printCsvDataLine();
@@ -5576,8 +5574,7 @@ void loop_offline_mode(void){
   static boolean first = true;
 
   if(first || (current_millis - previous_write_record_millis >= reporting_interval)){
-    first = false;
-    suspendGpsProcessing();
+    first = false;    
     previous_write_record_millis = current_millis;
     printCsvDataLine();
   }
@@ -6391,11 +6388,11 @@ void updateGpsStrings(void){
     // Serial.println(user_longitude, 6);
     // Serial.println(user_altitude, 2);
   }
-
+  
   memset(gps_mqtt_string, 0, GPS_MQTT_STRING_LENGTH);
   memset(gps_csv_string, 0, GPS_CSV_STRING_LENGTH);
 
-  if(user_location_override && (user_latitude != TinyGPS::GPS_INVALID_F_ANGLE) && (user_longitude != TinyGPS::GPS_INVALID_F_ANGLE)){
+  if(user_location_override && (user_latitude != TinyGPS::GPS_INVALID_F_ANGLE) && (user_longitude != TinyGPS::GPS_INVALID_F_ANGLE)){    
     if(user_altitude != -1.0f){
       snprintf(gps_mqtt_string, GPS_MQTT_STRING_LENGTH-1, gps_lat_lng_alt_field_mqtt_template, user_latitude, user_longitude, user_altitude);
       snprintf(gps_csv_string, GPS_CSV_STRING_LENGTH-1, gps_lat_lng_alt_field_csv_template, user_latitude, user_longitude, user_altitude);
@@ -6406,7 +6403,7 @@ void updateGpsStrings(void){
     }
   }
   else if((gps_latitude != TinyGPS::GPS_INVALID_F_ANGLE) && (gps_longitude != TinyGPS::GPS_INVALID_F_ANGLE)){
-    if(gps_altitude != TinyGPS::GPS_INVALID_F_ALTITUDE){
+    if(gps_altitude != TinyGPS::GPS_INVALID_F_ALTITUDE){      
       snprintf(gps_mqtt_string, GPS_MQTT_STRING_LENGTH-1, gps_lat_lng_alt_field_mqtt_template, gps_latitude, gps_longitude, gps_altitude);
       snprintf(gps_csv_string, GPS_CSV_STRING_LENGTH-1, gps_lat_lng_alt_field_csv_template, gps_latitude, gps_longitude, gps_altitude);
     }
@@ -6415,12 +6412,28 @@ void updateGpsStrings(void){
       snprintf(gps_csv_string, GPS_CSV_STRING_LENGTH-1, gps_lat_lng_field_csv_template, gps_latitude, gps_longitude);
     }
   }
-  else{
-    strcpy_P(gps_csv_string, PSTR(",---,---,---"));
+  else{    
+    strcpy_P(gps_csv_string, PSTR(",---,---,---"));    
   }
 }
 
 void suspendGpsProcessing(void){
+  if(gps_installed && !gps_disabled){
+    for(;;){
+      if(gpsSerial.available()){
+        char c = gpsSerial.read();
+        if(gps.encode(c)){        
+          gps.f_get_position(&gps_latitude, &gps_longitude, &gps_age);
+          gps_altitude = gps.f_altitude();        
+          updateGpsStrings();
+          break;
+        }
+        else if(c == '\n') {
+          break;
+        }
+      }
+    }  
+  }
   gpsSerial.end();
   gps_disabled = true;
 }
@@ -6545,6 +6558,7 @@ void doSoftApModeConfigBehavior(void){
     return;
   }
 
+  resumeGpsProcessing();
   clearTempBuffers();
 
   randomSeed(micros());
@@ -6634,20 +6648,24 @@ void doSoftApModeConfigBehavior(void){
             petWatchdog();
           }
 
-          // check backlight touch
-          if(currentMillis - previous_touch_sampling_millis >= touch_sampling_interval){
-            previous_touch_sampling_millis = currentMillis;
-            collectTouch();
-            processTouchQuietly();
-          }
-
-          // check to determine if we have a GPS
-          while(!gps_installed && gpsSerial.available()){
+          // check to determine if we have a GPS        
+          while(gpsSerial.available()){
             char c = gpsSerial.read();
             if(c == '$'){
-              gps_installed = true;
+              gps_installed = true;              
+              suspendGpsProcessing();
             }
-          }
+            processTouchBetweenGpsMessages(c);
+          }          
+
+          // check backlight touch          
+          if(currentMillis - previous_touch_sampling_millis >= touch_sampling_interval){
+            previous_touch_sampling_millis = currentMillis;
+            if(!gps_installed){
+              collectTouch();              
+            }
+            processTouchQuietly();
+          }          
 
           // pay attention to incoming traffic
           while(esp.available()){
@@ -7055,5 +7073,53 @@ void doESP8266Update(){
 
    Serial.flush();
    watchdogForceReset();
+}
+
+void processTouchBetweenGpsMessages(char c){
+  // actually all we care about is not interfering in a GPGGA transaction
+  // so what we should do is wait for $GPGG is a sufficient prefix, then
+  // run collectTouch after the following \n
+  static uint8_t idx = 0;
+  switch(idx){
+  case 0:
+    if(c == '$'){
+      idx++;
+    }
+    break;
+  case 1:
+    if(c == 'G'){
+      idx++;
+    }
+    else{
+      idx = 0;
+    }
+    break;
+  case 2: 
+    if(c == 'P'){
+      idx++;
+    }
+    else{
+      idx = 0;
+    }
+    break;
+  case 3:
+  case 4: 
+    if(c == 'G'){
+      idx++;
+    }
+    else{
+      idx = 0;
+    }
+    break;
+  default:
+    if(c == '\n'){
+      suspendGpsProcessing();
+      collectTouch();      
+      resumeGpsProcessing();
+      idx = 0;
+    }
+    break;
+  }
+
 }
 
